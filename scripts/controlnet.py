@@ -141,7 +141,6 @@ class Script(scripts.Script):
             "scribble": simple_scribble,
             "fake_scribble": fake_scribble,
             "segmentation": uniformer,
-            "depth (input depth map)": midasDepthMap,
         }
         self.unloadable = {
             "hed": unload_hed,
