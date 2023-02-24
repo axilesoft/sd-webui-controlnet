@@ -84,10 +84,6 @@ def midas(img, res=512, a=np.pi * 2.0, **kwargs):
     results, _ = model_midas(img, a)
     return results
 
-def midasDepthMap(img, res=512, a=np.pi * 2.0, **kwargs):
-    img = resize_image(HWC3(img), res)
-    return img
-
 def midas_normal(img, res=512, a=np.pi * 2.0, thr_a=0.4, **kwargs): # bg_th -> thr_a
     bg_th = thr_a
     img = resize_image(HWC3(img), res)
