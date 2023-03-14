@@ -714,7 +714,7 @@ class Script(scripts.Script):
                 f"{prefix} Guidance End": guidance_end,
             })
 
-        if len(params_group) == 0:
+        if len(params_group) == 0 or len(control_groups) == 0:
            self.latest_network = None
            return 
 
@@ -753,8 +753,15 @@ class Script(scripts.Script):
             elif input_image is not None:
                 input_image = HWC3(np.asarray(input_image))
             elif image is not None:
-                input_image = HWC3(image['image'])
-                if not ((image['mask'][:, :, 0]==0).all() or (image['mask'][:, :, 0]==255).all()):
+                # Need to check the image for API compatibility
+                if isinstance(image['image'], str):
+                    from modules.api.api import decode_base64_to_image
+                    input_image = HWC3(np.asarray(decode_base64_to_image(image['image'])))
+                else:
+                    input_image = HWC3(image['image'])
+
+                # Adding 'mask' check for API compatibility
+                if 'mask' in image and not ((image['mask'][:, :, 0]==0).all() or (image['mask'][:, :, 0]==255).all()):
                     print("using mask as input")
                     input_image = HWC3(image['mask'][:, :, 0])
                     scribble_mode = True
@@ -812,7 +819,7 @@ class Script(scripts.Script):
             
         self.latest_network = UnetHook(lowvram=hook_lowvram)    
         self.latest_network.hook(unet)
-        self.latest_network.notify(forward_params, p.sampler_name in ["DDIM", "PLMS"])
+        self.latest_network.notify(forward_params, p.sampler_name in ["DDIM", "PLMS", "UniPC"])
         self.detected_map = detected_maps
             
         if len(control_groups) > 0 and shared.opts.data.get("control_net_skip_img2img_processing") and hasattr(p, "init_images"):
