@@ -22,7 +22,7 @@ from modules import sd_models
 from modules.paths import models_path
 from modules.processing import StableDiffusionProcessingImg2Img
 from modules.images import save_image
-from PIL import Image
+from PIL import Image,ImageGrab
 from torchvision.transforms import Resize, InterpolationMode, CenterCrop, Compose
 
 gradio_compat = True
@@ -262,6 +262,7 @@ class Script(scripts.Script):
         with gr.Row():
             input_image = gr.Image(source='upload', mirror_webcam=False, type='numpy', tool='sketch')
             generated_image = gr.Image(label="Annotator result", visible=False)
+            webcam_grab = ToolButton(value="P")
 
         with gr.Row():
             gr.HTML(value='<p>Invert colors if your image has white background.<br >Change your brush width to make it thinner if you want to draw something.<br ></p>')
@@ -278,6 +279,10 @@ class Script(scripts.Script):
 
         ctrls += (enabled,)
         # infotext_fields.append((enabled, "ControlNet Enabled"))
+        def webcam_grab_click():
+            img = ImageGrab.grabclipboard()
+            return img
+        webcam_grab.click(fn=webcam_grab_click, inputs=None, outputs=input_image)
         
         def send_dimensions(image):
             def closesteight(num):
