@@ -12,17 +12,21 @@ import gradio as gr
 import numpy as np
 
 from einops import rearrange
+from scripts import global_state, hook, external_code
+importlib.reload(global_state)
+importlib.reload(hook)
+importlib.reload(external_code)
 from scripts.cldm import PlugableControlModel
 from scripts.processor import *
 from scripts.adapter import PlugableAdapter
 from scripts.utils import load_state_dict
 from scripts.hook import ControlParams, UnetHook
-from scripts import external_code, global_state
-importlib.reload(global_state)
-importlib.reload(external_code)
-from modules.processing import StableDiffusionProcessingImg2Img
+from modules.processing import StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 from modules.images import save_image
+
+import cv2
 from PIL import Image,ImageGrab
+
 from torchvision.transforms import Resize, InterpolationMode, CenterCrop, Compose
 
 gradio_compat = True
@@ -122,6 +126,7 @@ class Script(scripts.Script):
     def __init__(self) -> None:
         super().__init__()
         self.latest_network = None
+        self.preprocessor_keys = global_state.module_names
         self.preprocessor = global_state.cn_preprocessor_modules
         self.unloadable = global_state.cn_preprocessor_unloadable
         self.input_image = None
@@ -152,6 +157,11 @@ class Script(scripts.Script):
         if component.elem_id == "img2img_height":
             self.img2img_h_slider = component
             return self.img2img_h_slider
+        
+    def get_module_basename(self, module):
+        for k, v in self.preprocessor_keys.items():
+            if v == module or k == module:
+                return k
         
     def get_threshold_block(self, proc):
         pass
@@ -228,7 +238,7 @@ class Script(scripts.Script):
             return gr.Dropdown.update(value=selected, choices=list(global_state.cn_models.keys()))
 
         with gr.Row():
-            module = gr.Dropdown(list(self.preprocessor.keys()), label=f"Preprocessor", value=default_unit.module)
+            module = gr.Dropdown(list(self.preprocessor_keys.values()), label=f"Preprocessor", value=default_unit.module)
             model = gr.Dropdown(list(global_state.cn_models.keys()), label=f"Model", value=default_unit.model)
             refresh_models = ToolButton(value=refresh_symbol)
             refresh_models.click(refresh_all_models, model, model)
@@ -241,6 +251,7 @@ class Script(scripts.Script):
             ctrls += (module, model, weight,)
                 # model_dropdowns.append(model)
         def build_sliders(module):
+            module = self.get_module_basename(module)
             if module == "canny":
                 return [
                     gr.update(label="Annotator resolution", value=512, minimum=64, maximum=2048, step=1, interactive=True),
@@ -255,14 +266,14 @@ class Script(scripts.Script):
                     gr.update(label="Hough distance threshold (MLSD)", minimum=0.01, maximum=20.0, value=0.1, step=0.01, interactive=True),
                     gr.update(visible=True)
                 ]
-            elif module in ["hed", "fake_scribble"]:
+            elif module in ["hed", "scribble_hed", "hed_safe"]:
                 return [
                     gr.update(label="HED Resolution", minimum=64, maximum=2048, value=512, step=1, interactive=True),
                     gr.update(label="Threshold A", value=64, minimum=64, maximum=1024, interactive=False),
                     gr.update(label="Threshold B", value=64, minimum=64, maximum=1024, interactive=False),
                     gr.update(visible=True)
                 ]
-            elif module in ["openpose", "openpose_hand", "segmentation"]:
+            elif module in ["openpose", "openpose_full", "segmentation"]:
                 return [
                     gr.update(label="Annotator Resolution", minimum=64, maximum=2048, value=512, step=1, interactive=True),
                     gr.update(label="Threshold A", value=64, minimum=64, maximum=1024, interactive=False),
@@ -271,7 +282,7 @@ class Script(scripts.Script):
                 ]
             elif module == "depth":
                 return [
-                    gr.update(label="Midas Resolution", minimum=64, maximum=2048, value=384, step=1, interactive=True),
+                    gr.update(label="Midas Resolution", minimum=64, maximum=2048, value=512, step=1, interactive=True),
                     gr.update(label="Threshold A", value=64, minimum=64, maximum=1024, interactive=False),
                     gr.update(label="Threshold B", value=64, minimum=64, maximum=1024, interactive=False),
                     gr.update(visible=True)
@@ -290,10 +301,24 @@ class Script(scripts.Script):
                     gr.update(label="Threshold B", value=64, minimum=64, maximum=1024, interactive=False),
                     gr.update(visible=True)
                 ]
-            elif module == "binary":
+            elif module == "threshold":
                 return [
                     gr.update(label="Annotator resolution", value=512, minimum=64, maximum=2048, step=1, interactive=True),
-                    gr.update(label="Binary threshold", minimum=0, maximum=255, value=0, step=1, interactive=True),
+                    gr.update(label="Binarization Threshold", minimum=0, maximum=255, value=127, step=1, interactive=True),
+                    gr.update(label="Threshold B", value=64, minimum=64, maximum=1024, interactive=False),
+                    gr.update(visible=True)
+                ]
+            elif module == "scribble_xdog":
+                return [
+                    gr.update(label="Annotator resolution", value=512, minimum=64, maximum=2048, step=1, interactive=True),
+                    gr.update(label="XDoG Threshold", minimum=1, maximum=64, value=32, step=1, interactive=True),
+                    gr.update(label="Threshold B", value=64, minimum=64, maximum=1024, interactive=False),
+                    gr.update(visible=True)
+                ]
+            elif module == "tile_gaussian":
+                return [
+                    gr.update(label="Annotator resolution", value=512, minimum=64, maximum=2048, step=1, interactive=True),
+                    gr.update(label="Gaussian Sigma", minimum=0.5, maximum=16, value=5, step=0.01, interactive=True),
                     gr.update(label="Threshold B", value=64, minimum=64, maximum=1024, interactive=False),
                     gr.update(visible=True)
                 ]
@@ -323,12 +348,12 @@ class Script(scripts.Script):
         advanced = gr.Column(visible=False)
         with advanced:
             processor_res = gr.Slider(label="Annotator resolution", value=default_unit.processor_res, minimum=64, maximum=2048, interactive=False)
-            threshold_a =  gr.Slider(label="Threshold A", value=default_unit.threshold_a, minimum=64, maximum=1024, interactive=False)
-            threshold_b =  gr.Slider(label="Threshold B", value=default_unit.threshold_b, minimum=64, maximum=1024, interactive=False)
+            threshold_a = gr.Slider(label="Threshold A", value=default_unit.threshold_a, minimum=64, maximum=1024, interactive=False)
+            threshold_b = gr.Slider(label="Threshold B", value=default_unit.threshold_b, minimum=64, maximum=1024, interactive=False)
             
         if gradio_compat:    
             module.change(build_sliders, inputs=[module], outputs=[processor_res, threshold_a, threshold_b, advanced])
-                
+
         # infotext_fields.extend((module, model, weight))
 
         def create_canvas(h, w):
@@ -364,6 +389,8 @@ class Script(scripts.Script):
             img = HWC3(image['image'])
             if not ((image['mask'][:, :, 0]==0).all() or (image['mask'][:, :, 0]==255).all()):
                 img = HWC3(image['mask'][:, :, 0])
+                
+            module = self.get_module_basename(module)
             preprocessor = self.preprocessor[module]
             result = None
             if pres > 64:
@@ -567,49 +594,46 @@ class Script(scripts.Script):
 
     def detectmap_proc(self, detected_map, module, rgbbgr_mode, resize_mode, h, w):
         detected_map = HWC3(detected_map)
-        if module == "normal_map" or rgbbgr_mode:
-            control = torch.from_numpy(detected_map[:, :, ::-1].copy()).float().to(devices.get_device_for("controlnet")) / 255.0
-        else:
-            control = torch.from_numpy(detected_map.copy()).float().to(devices.get_device_for("controlnet")) / 255.0
-            
-        control = rearrange(control, 'h w c -> c h w')
-        detected_map = rearrange(torch.from_numpy(detected_map), 'h w c -> c h w')
 
-        if resize_mode == external_code.ResizeMode.INNER_FIT:
-            h0 = detected_map.shape[1]
-            w0 = detected_map.shape[2]
-            w1 = w0
-            h1 = int(w0/w*h)
-            if (h/w > h0/w0):
-                h1 = h0
-                w1 = int(h0/h*w)
-            transform = Compose([
-                CenterCrop(size=(h1, w1)),
-                Resize(size=(h, w), interpolation=InterpolationMode.BICUBIC)
-            ])
-            control = transform(control)
-            detected_map = transform(detected_map)
-        elif resize_mode == external_code.ResizeMode.OUTER_FIT:
-            h0 = detected_map.shape[1]
-            w0 = detected_map.shape[2]
-            h1 = h0
-            w1 = int(h0/h*w)
-            if (h/w > h0/w0):
-                w1 = w0
-                h1 = int(w0/w*h)
-            transform = Compose([
-                CenterCrop(size=(h1, w1)),
-                Resize(size=(h, w),interpolation=InterpolationMode.BICUBIC)
-            ])
-            control = transform(control)
-            detected_map = transform(detected_map)
+        if module == "normal_map" or rgbbgr_mode:
+            detected_map = detected_map[:, :, ::-1].copy()
+
+        def get_pytorch_control(x):
+            y = torch.from_numpy(x).to(devices.get_device_for("controlnet"))
+            return rearrange(y.float() / 255.0, 'h w c -> c h w')
+
+        if resize_mode == external_code.ResizeMode.RESIZE:
+            detected_map = cv2.resize(detected_map, (w, h), interpolation=cv2.INTER_CUBIC)
+            return get_pytorch_control(detected_map), detected_map
+
+        old_h, old_w, _ = detected_map.shape
+        old_w = float(old_w)
+        old_h = float(old_h)
+        k0 = float(h) / old_h
+        k1 = float(w) / old_w
+
+        safeint = lambda x: int(np.round(x))
+
+        if resize_mode == external_code.ResizeMode.OUTER_FIT:
+            k = min(k0, k1)
+            borders = np.concatenate([detected_map[0, :, :], detected_map[-1, :, :], detected_map[:, 0, :], detected_map[:, -1, :]], axis=0)
+            high_quality_border_color = np.median(borders, axis=0).astype(detected_map.dtype)
+            high_quality_background = cv2.resize(high_quality_border_color[None, None], (w, h), interpolation=cv2.INTER_NEAREST)
+            detected_map = cv2.resize(detected_map, (safeint(old_w * k), safeint(old_h * k)), interpolation=cv2.INTER_AREA)
+            new_h, new_w, _ = detected_map.shape
+            pad_h = max(0, (h - new_h) // 2)
+            pad_w = max(0, (w - new_w) // 2)
+            high_quality_background[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = detected_map
+            detected_map = high_quality_background
+            return get_pytorch_control(detected_map), detected_map
         else:
-            control = Resize((h,w), interpolation=InterpolationMode.BICUBIC)(control)
-            detected_map = Resize((h,w), interpolation=InterpolationMode.BICUBIC)(detected_map)
-       
-        # for log use
-        detected_map = rearrange(detected_map, 'c h w -> h w c').numpy().astype(np.uint8)
-        return control, detected_map
+            k = max(k0, k1)
+            detected_map = cv2.resize(detected_map, (safeint(old_w * k), safeint(old_h * k)), interpolation=cv2.INTER_LANCZOS4)
+            new_h, new_w, _ = detected_map.shape
+            pad_h = max(0, (new_h - h) // 2)
+            pad_w = max(0, (new_w - w) // 2)
+            detected_map = detected_map[pad_h:pad_h+h, pad_w:pad_w+w]
+            return get_pytorch_control(detected_map), detected_map
 
     def is_ui(self, args):
         return args and isinstance(args[0], external_code.ControlNetUnit) and getattr(args[0], 'is_ui', False)
@@ -669,10 +693,11 @@ class Script(scripts.Script):
         module_list = [unit.module for unit in enabled_units]
         for key in self.unloadable:
             if key not in module_list:
-                self.unloadable.get(unit.module, lambda:None)()
+                self.unloadable.get(key, lambda:None)()
 
         self.latest_model_hash = p.sd_model.sd_model_hash
         for idx, unit in enumerate(enabled_units):
+            unit.module = self.get_module_basename(unit.module)
             p_input_image = self.get_remote_call(p, "control_net_input_image", None, idx)
             image = image_dict_from_unit(unit)
             if image is not None:
@@ -729,10 +754,7 @@ class Script(scripts.Script):
                 input_image = images.resize_image(2, input_image, p.width, p.height)
                 input_image = HWC3(np.asarray(input_image))
 
-            if invert_image:
-                detected_map = np.zeros_like(input_image, dtype=np.uint8)
-                detected_map[np.min(input_image, axis=2) < 127] = 255
-                input_image = detected_map
+            np.random.seed(int(p.seed) % 65535)
 
             print(f"Loading preprocessor: {unit.module}")
             preprocessor = self.preprocessor[unit.module]
@@ -741,21 +763,42 @@ class Script(scripts.Script):
                 detected_map, is_image = preprocessor(input_image, res=unit.processor_res, thr_a=unit.threshold_a, thr_b=unit.threshold_b)
             else:
                 detected_map, is_image = preprocessor(input_image)
+                
+            if invert_image:
+                detected_map = 255 - detected_map.copy() 
 
             if unit.module == "none" and "style" in unit.model:
                 detected_map_bytes = detected_map[:,:,0].tobytes()
                 detected_map = np.ndarray((round(input_image.shape[0]/4),input_image.shape[1]),dtype="float32",buffer=detected_map_bytes)
                 detected_map = torch.Tensor(detected_map).to(devices.get_device_for("controlnet"))
                 is_image = False
-                            
+
+            if isinstance(p, StableDiffusionProcessingTxt2Img) and p.enable_hr:
+                if p.hr_resize_x == 0 and p.hr_resize_y == 0:
+                    hr_y = int(p.height * p.hr_scale)
+                    hr_x = int(p.width * p.hr_scale)
+                else:
+                    hr_y, hr_x = p.hr_resize_y, p.hr_resize_x
+
+                if is_image:
+                    hr_control, _ = self.detectmap_proc(detected_map, unit.module, unit.rgbbgr_mode, resize_mode, hr_y, hr_x)
+                else:
+                    hr_control = detected_map
+            else:
+                hr_control = None
+
             if is_image:
                 control, detected_map = self.detectmap_proc(detected_map, unit.module, unit.rgbbgr_mode, resize_mode, h, w)
                 detected_maps.append((detected_map, unit.module))
             else:
                 control = detected_map
+
                 if unit.module == 'clip_vision':
-                    fake_detected_map = np.ndarray((detected_map.shape[0]*4, detected_map.shape[1]),dtype="uint8",buffer=detected_map.numpy(force=True).tobytes())
+                    fake_detected_map = np.ndarray((detected_map.shape[0]*4, detected_map.shape[1]),dtype="uint8", buffer=detected_map.detach().cpu().numpy().tobytes())
                     detected_maps.append((fake_detected_map, unit.module))
+
+            is_vanilla_samplers = p.sampler_name in ["DDIM", "PLMS", "UniPC"]
+
 
             forward_param = ControlParams(
                 control_model=model_net,
@@ -767,7 +810,13 @@ class Script(scripts.Script):
                 stop_guidance_percent=unit.guidance_end,
                 advanced_weighting=None,
                 is_adapter=isinstance(model_net, PlugableAdapter),
-                is_extra_cond=getattr(model_net, "target", "") == "scripts.adapter.StyleAdapter"
+                is_extra_cond=getattr(model_net, "target", "") == "scripts.adapter.StyleAdapter",
+                global_average_pooling=model_net.config.model.params.get("global_average_pooling", False),
+                hr_hint_cond=hr_control,
+                batch_size=p.batch_size,
+                instance_counter=0,
+                is_vanilla_samplers=is_vanilla_samplers,
+                cfg_scale=p.cfg_scale
             )
             forward_params.append(forward_param)
 
@@ -775,7 +824,7 @@ class Script(scripts.Script):
 
         self.latest_network = UnetHook(lowvram=hook_lowvram)    
         self.latest_network.hook(unet)
-        self.latest_network.notify(forward_params, p.sampler_name in ["DDIM", "PLMS", "UniPC"])
+        self.latest_network.notify(forward_params, is_vanilla_samplers)
         self.detected_map = detected_maps
 
         if len(enabled_units) > 0 and shared.opts.data.get("control_net_skip_img2img_processing") and hasattr(p, "init_images"):
@@ -802,8 +851,6 @@ class Script(scripts.Script):
             for detect_map, module in self.detected_map:
                 if detect_map is None:
                     continue
-                if module in ["canny", "mlsd", "scribble", "fake_scribble", "pidinet", "binary"]:
-                    detect_map = 255-detect_map
                 processed.images.extend([Image.fromarray(detect_map)])
 
         self.input_image = None
@@ -843,8 +890,6 @@ def on_ui_settings():
         False, "Do not append detectmap to output", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_detectmap_autosaving", shared.OptionInfo(
         False, "Allow detectmap auto saving", gr.Checkbox, {"interactive": True}, section=section))
-    shared.opts.add_option("control_net_only_midctrl_hires", shared.OptionInfo(
-        True, "Use mid-control on highres pass (second pass)", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_allow_script_control", shared.OptionInfo(
         False, "Allow other script to control this extension", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_skip_img2img_processing", shared.OptionInfo(
@@ -853,8 +898,6 @@ def on_ui_settings():
         False, "Enable optimized monocular depth estimation", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_only_mid_control", shared.OptionInfo(
         False, "Only use mid-control when inference", gr.Checkbox, {"interactive": True}, section=section))
-    shared.opts.add_option("control_net_cfg_based_guidance", shared.OptionInfo(
-        False, "Enable CFG-Based guidance", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_sync_field_args", shared.OptionInfo(
         False, "Passing ControlNet parameters with \"Send to img2img\"", gr.Checkbox, {"interactive": True}, section=section))
     # shared.opts.add_option("control_net_advanced_weighting", shared.OptionInfo(
