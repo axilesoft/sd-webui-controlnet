@@ -456,7 +456,7 @@ class Script(scripts.Script):
                 return input_image.orgpreprocess(inputs)
             return None
 
-        def run_annotator(image, module, pres, pthr_a, pthr_b):
+        def run_annotator(image, module, pres, pthr_a, pthr_b, t2i_w, t2i_h, pp, rm):
             if image is None:
                 return gr.update(value=None, visible=True)
 
@@ -472,6 +472,29 @@ class Script(scripts.Script):
             module = self.get_module_basename(module)
             preprocessor = self.preprocessor[module]
 
+            if pp:
+                raw_H, raw_W, _ = img.shape
+                target_H, target_W = t2i_h, t2i_w
+                rm = str(rm)
+
+                k0 = float(target_H) / float(raw_H)
+                k1 = float(target_W) / float(raw_W)
+
+                if rm == external_code.ResizeMode.OUTER_FIT.value:
+                    estimation = min(k0, k1) * float(min(raw_H, raw_W))
+                else:
+                    estimation = max(k0, k1) * float(min(raw_H, raw_W))
+
+                pres = int(np.round(float(estimation) / 64.0)) * 64
+                print(f'Pixel Perfect Mode Enabled In Preview.')
+                print(f'resize_mode = {rm}')
+                print(f'raw_H = {raw_H}')
+                print(f'raw_W = {raw_W}')
+                print(f'target_H = {target_H}')
+                print(f'target_W = {target_W}')
+                print(f'estimation = {estimation}')
+
+            print(f'Preview Resolution = {pres}')
             result, is_image = preprocessor(img, res=pres, thr_a=pthr_a, thr_b=pthr_b)
 
             if is_image:
@@ -490,7 +513,6 @@ class Script(scripts.Script):
                 return gr.update(visible=False), gr.update(visible=False)
 
         preprocessor_preview.change(fn=shift_preview, inputs=[preprocessor_preview], outputs=[trigger_preprocessor, generated_image])
-        trigger_preprocessor.click(fn=run_annotator, inputs=[input_image, module, processor_res, threshold_a, threshold_b], outputs=[generated_image])
 
         if is_img2img:
             send_dimen_button.click(fn=send_dimensions, inputs=[input_image], outputs=[self.img2img_w_slider, self.img2img_h_slider])
@@ -502,6 +524,13 @@ class Script(scripts.Script):
         resize_mode = gr.Radio(choices=[e.value for e in external_code.ResizeMode], value=default_unit.resize_mode.value, label="Resize Mode")
 
         loopback = gr.Checkbox(label='[Loopback] Automatically send generated images to this ControlNet unit', value=default_unit.loopback)
+
+        trigger_preprocessor.click(fn=run_annotator, inputs=[
+            input_image, module, processor_res, threshold_a, threshold_b,
+            self.img2img_w_slider if is_img2img else self.txt2img_w_slider,
+            self.img2img_h_slider if is_img2img else self.txt2img_h_slider,
+            pixel_perfect, resize_mode
+        ], outputs=[generated_image])
 
         def fn_canvas(h, w):
             return np.zeros(shape=(h, w, 3), dtype=np.uint8) + 255, gr.Accordion.update(visible=False)
@@ -906,17 +935,21 @@ class Script(scripts.Script):
 
             enabled_units.append(copy(unit))
             if len(units) != 1:
-                prefix = f"ControlNet-{idx}"
+                prefix = f"ControlNet {idx}"
             else:
                 prefix = "ControlNet"
 
             p.extra_generation_params.update({
                 f"{prefix} Enabled": True,
-                f"{prefix} Module": unit.module,
+                f"{prefix} Preprocessor": unit.module,
                 f"{prefix} Model": unit.model,
                 f"{prefix} Weight": unit.weight,
-                f"{prefix} Guidance Start": unit.guidance_start,
-                f"{prefix} Guidance End": unit.guidance_end,
+                f"{prefix} Starting Step": unit.guidance_start,
+                f"{prefix} Ending Step": unit.guidance_end,
+                f"{prefix} Resize Mode": str(unit.resize_mode),
+                f"{prefix} Pixel Perfect": str(unit.pixel_perfect),
+                f"{prefix} Control Mode": str(unit.control_mode),
+                f"{prefix} Preprocessor Parameters": str((unit.processor_res, unit.threshold_a, unit.threshold_b)),
             })
 
         return enabled_units
