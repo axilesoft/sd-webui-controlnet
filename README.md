@@ -2,7 +2,7 @@
 
 (WIP) WebUI extension for ControlNet and other injection-based SD controls.
 
-![image](https://user-images.githubusercontent.com/19834515/233910272-6ef975ec-c05a-43ef-9a82-42bd7d108244.png)
+![image](https://user-images.githubusercontent.com/19834515/235606305-229b3d1e-5bfc-467f-9d55-0976eab71652.png)
 
 This extension is for AUTOMATIC1111's [Stable Diffusion web UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui), allows the Web UI to add [ControlNet](https://github.com/lllyasviel/ControlNet) to the original Stable Diffusion model to generate images. The addition is on-the-fly, the merging is not required.
 
@@ -64,7 +64,7 @@ We reorganized some previously confusing UI like "canvas width/height for new ca
 
 **Support for Upscaling Scripts**
 
-Now ControlNet 1.1 can support almost all Upscaling/Tile methods. But please note that because of a limitation of A1111, ControlNet cannot support the script "SD upscale". It is impossible to support "SD upscale". However, ControlNet 1.1 perfectly support the script "Ultimate SD upscale" and almost all other tile-based extensions. Please do not confuse "Ultimate SD upscale" with "SD upscale" - they are different scripts. Note that the recommended upscaling method is [tiled diffusion](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111) but we test as many methods/extensions as possible.
+Now ControlNet 1.1 can support almost all Upscaling/Tile methods. ControlNet 1.1 support the script "Ultimate SD upscale" and almost all other tile-based extensions. Please do not confuse ["Ultimate SD upscale"](https://github.com/Coyote-A/ultimate-upscale-for-automatic1111) with "SD upscale" - they are different scripts. Note that the most recommended upscaling method is ["Tiled VAE/Diffusion"](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111) but we test as many methods/extensions as possible. Note that "SD upscale" is supported since 1.1.117, and if you use it, you need to leave all ControlNet images as blank (We do not recommend "SD upscale" since it is somewhat buggy and cannot be maintained).
 
 **Control Mode (previously called Guess Mode)**
 
@@ -101,7 +101,7 @@ If you are a previous user of ControlNet 1.0, you may:
 
 This is my setting. If you run into any problem, you can use this setting as a sanity check
 
-![image](https://user-images.githubusercontent.com/19834515/233909293-a6b75cb7-30fb-4679-8dad-d28b02755ebd.png)
+![image](https://user-images.githubusercontent.com/19834515/235620638-17937171-8ac1-45bc-a3cb-3aebf605b4ef.png)
 
 ### Previous Models
 

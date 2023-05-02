@@ -1,5 +1,6 @@
 import os.path
 import stat
+import functools
 from collections import OrderedDict
 
 from modules import shared, scripts, sd_models
@@ -16,17 +17,18 @@ cn_preprocessor_modules = {
     "none": lambda x, *args, **kwargs: (x, True),
     "canny": canny,
     "depth": midas,
-    "depth_leres": leres,
+    "depth_leres": functools.partial(leres, boost=False),
+    "depth_leres++": functools.partial(leres, boost=True),
     "hed": hed,
     "hed_safe": hed_safe,
     "mediapipe_face": mediapipe_face,
     "mlsd": mlsd,
     "normal_map": midas_normal,
-    "openpose": openpose,
-    "openpose_hand": openpose_hand,
-    "openpose_face": openpose_face,
-    "openpose_faceonly": openpose_faceonly,
-    "openpose_full": openpose_full,
+    "openpose": functools.partial(g_openpose_model.run_model, include_body=True, include_hand=False, include_face=False),
+    "openpose_hand": functools.partial(g_openpose_model.run_model, include_body=True, include_hand=True, include_face=False),
+    "openpose_face": functools.partial(g_openpose_model.run_model, include_body=True, include_hand=False, include_face=True),
+    "openpose_faceonly": functools.partial(g_openpose_model.run_model, include_body=False, include_hand=False, include_face=True),
+    "openpose_full": functools.partial(g_openpose_model.run_model, include_body=True, include_hand=True, include_face=True),
     "clip_vision": clip,
     "color": color,
     "pidinet": pidinet,
@@ -63,10 +65,10 @@ cn_preprocessor_unloadable = {
     "depth_leres": unload_leres,
     "normal_map": unload_midas,
     "pidinet": unload_pidinet,
-    "openpose": unload_openpose,
-    "openpose_hand": unload_openpose,
-    "openpose_face": unload_openpose,
-    "openpose_full": unload_openpose,
+    "openpose": g_openpose_model.unload,
+    "openpose_hand": g_openpose_model.unload,
+    "openpose_face": g_openpose_model.unload,
+    "openpose_full": g_openpose_model.unload,
     "segmentation": unload_uniformer,
     "depth_zoe": unload_zoe_depth,
     "normal_bae": unload_normal_bae,

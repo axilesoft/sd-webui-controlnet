@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from annotator.util import resize_image, HWC3
 
+from typing import Callable, Tuple
 
 model_canny = None
 
@@ -164,13 +165,13 @@ def unload_midas():
 
 model_leres = None
 
-def leres(img, res=512, a=np.pi * 2.0, thr_a=0, thr_b=0, **kwargs):
+def leres(img, res=512, a=np.pi * 2.0, thr_a=0, thr_b=0, boost=False, **kwargs):
     img = resize_image(HWC3(img), res)
     global model_leres
     if model_leres is None:
         from annotator.leres import apply_leres
         model_leres = apply_leres
-    results = model_leres(img, thr_a, thr_b)
+    results = model_leres(img, thr_a, thr_b, boost=boost)
     return results, True
 
 def unload_leres():
@@ -179,58 +180,47 @@ def unload_leres():
         from annotator.leres import unload_leres_model
         unload_leres_model()
 
-model_openpose = None
+class OpenposeModel(object):
+    def __init__(self) -> None:
+        self.model_openpose = None
+        
+    def run_model(
+            self, 
+            img: np.ndarray, 
+            include_body: bool, 
+            include_hand: bool, 
+            include_face: bool,
+            json_pose_callback: Callable[[str], None] = None,
+            res: int = 512, 
+            **kwargs  # Ignore rest of kwargs
+        ) -> Tuple[np.ndarray, bool]:
+        """Run the openpose model. Returns a tuple of
+        - result image
+        - is_image flag
 
+        The JSON format pose string is passed to `json_pose_callback`.
+        """
+        if json_pose_callback is None:
+            json_pose_callback = lambda x: None
 
-def openpose(img, res=512, **kwargs):
-    img = resize_image(HWC3(img), res)
-    global model_openpose
-    if model_openpose is None:
-        from annotator.openpose import OpenposeDetector
-        model_openpose = OpenposeDetector()
-    result = model_openpose(img)
-    return result, True
+        img = resize_image(HWC3(img), res)
+        if self.model_openpose is None:
+            from annotator.openpose import OpenposeDetector
+            self.model_openpose = OpenposeDetector()
+                
+        return self.model_openpose(
+            img, 
+            include_body=include_body, 
+            include_hand=include_hand, 
+            include_face=include_face,
+            json_pose_callback=json_pose_callback
+        ), True
+    
+    def unload(self):
+        if self.model_openpose is not None:
+            self.model_openpose.unload_model()
 
-def openpose_face(img, res=512, **kwargs):
-    img = resize_image(HWC3(img), res)
-    global model_openpose
-    if model_openpose is None:
-        from annotator.openpose import OpenposeDetector
-        model_openpose = OpenposeDetector()
-    result = model_openpose(img, include_hand=False, include_face=True)
-    return result, True
-
-def openpose_faceonly(img, res=512, **kwargs):
-    img = resize_image(HWC3(img), res)
-    global model_openpose
-    if model_openpose is None:
-        from annotator.openpose import OpenposeDetector
-        model_openpose = OpenposeDetector()
-    result = model_openpose(img, include_body=False, include_face=True)
-    return result, True
-
-def openpose_hand(img, res=512, **kwargs):
-    img = resize_image(HWC3(img), res)
-    global model_openpose
-    if model_openpose is None:
-        from annotator.openpose import OpenposeDetector
-        model_openpose = OpenposeDetector()
-    result = model_openpose(img, include_hand=True, include_face=False)
-    return result, True
-
-def openpose_full(img, res=512, **kwargs):
-    img = resize_image(HWC3(img), res)
-    global model_openpose
-    if model_openpose is None:
-        from annotator.openpose import OpenposeDetector
-        model_openpose = OpenposeDetector()
-    result = model_openpose(img, include_hand=True, include_face=True)
-    return result, True
-
-def unload_openpose():
-    global model_openpose
-    if model_openpose is not None:
-        model_openpose.unload_model()
+g_openpose_model = OpenposeModel()
 
 
 model_uniformer = None
@@ -310,6 +300,10 @@ def clip(img, res=512, **kwargs):
         clip_encoder = apply_clip
     result = clip_encoder(img).squeeze(0)
     return result, False
+
+
+def clip_vision_visualization(x):
+    return np.ndarray((x.shape[0] * 4, x.shape[1]), dtype="uint8", buffer=x.detach().cpu().numpy().tobytes())
 
 
 def unload_clip():
