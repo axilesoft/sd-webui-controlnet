@@ -919,7 +919,7 @@ class Script(scripts.Script):
             y = y.clone()
             return y
 
-        def high_quality_resize(x, size):
+        def high_quality_resize(x, size, unique_color_count=0):
             # Written by lvmin
             # Super high-quality control map up-scaling, considering binary, seg, and one-pixel edges
 
@@ -930,7 +930,8 @@ class Script(scripts.Script):
 
             new_size_is_smaller = (size[0] * size[1]) < (x.shape[0] * x.shape[1])
             new_size_is_bigger = (size[0] * size[1]) > (x.shape[0] * x.shape[1])
-            unique_color_count = np.unique(x.reshape(-1, x.shape[2]), axis=0).shape[0]
+            if unique_color_count == 0 :
+                unique_color_count = np.unique(x.reshape(-1, x.shape[2]), axis=0).shape[0]
             is_one_pixel_edge = False
             is_binary = False
             if unique_color_count == 2:
@@ -997,7 +998,7 @@ class Script(scripts.Script):
             return get_pytorch_control(detected_map), detected_map
         else:
             k = max(k0, k1)
-            detected_map = high_quality_resize(detected_map, (safeint(old_w * k), safeint(old_h * k)))
+            detected_map = high_quality_resize(detected_map, (safeint(old_w * k), safeint(old_h * k)),0 if k>=1 else 256)
             new_h, new_w, _ = detected_map.shape
             pad_h = max(0, (new_h - h) // 2)
             pad_w = max(0, (new_w - w) // 2)
