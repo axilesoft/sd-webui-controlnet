@@ -37,6 +37,7 @@ from PIL import Image, ImageFilter, ImageOps, ImageGrab
 from scripts.lvminthin import lvmin_thin, nake_nms
 
 from torchvision.transforms import Resize, InterpolationMode, CenterCrop, Compose
+from scripts.processor import preprocessor_sliders_config, flag_preprocessor_resolution
 
 gradio_compat = True
 try:
@@ -249,6 +250,9 @@ class Script(scripts.Script):
             return self.img2img_h_slider
 
     def get_module_basename(self, module):
+        if module is None:
+            module = 'none'
+
         return global_state.reverse_preprocessor_aliases.get(module, module)
 
     def get_threshold_block(self, proc):
@@ -259,8 +263,7 @@ class Script(scripts.Script):
         return cls(
             enabled=False,
             module="none",
-            model="None",
-            guess_mode=False,
+            model="None"
         )
 
     def uigroup(self, tabname, is_img2img, elem_id_tabname):
@@ -268,7 +271,7 @@ class Script(scripts.Script):
         default_unit = self.get_default_ui_unit()
         with gr.Tabs():
             with gr.Tab(label='Single Image') as upload_tab:
-                with gr.Row(equal_height=True):
+                with gr.Row().style(equal_height=True):
                     input_image = gr.Image(source='upload', brush_radius=20, mirror_webcam=False, type='numpy', tool='sketch', elem_id=f'{elem_id_tabname}_{tabname}_input_image')
                     # Gradio's magic number. Only 242 works.
 
@@ -322,8 +325,6 @@ class Script(scripts.Script):
         with FormRow(elem_classes="checkboxes-row", variant="compact"):
             enabled = gr.Checkbox(label='Enable', value=default_unit.enabled)
             lowvram = gr.Checkbox(label='Low VRAM', value=default_unit.low_vram)
-            guess_mode = gr.Checkbox(label='Guess Mode', value=default_unit.guess_mode, interactive=False, visible=False)
-            # Guess mode will be removed soon after API is fixed.
             pixel_perfect = gr.Checkbox(label='Pixel Perfect', value=default_unit.pixel_perfect)
             preprocessor_preview = gr.Checkbox(label='Allow Preview', value=False, elem_id=preview_check_elem_id)
 
@@ -382,104 +383,38 @@ class Script(scripts.Script):
 
         def build_sliders(module, pp):
             module = self.get_module_basename(module)
-            if module == "canny":
+            if module not in preprocessor_sliders_config:
                 return [
-                    gr.update(label="Preprocessor resolution", value=512, minimum=64, maximum=2048, step=1, visible=not pp, interactive=not pp),
-                    gr.update(label="Canny low threshold", minimum=1, maximum=255, value=100, step=1, visible=True, interactive=True),
-                    gr.update(label="Canny high threshold", minimum=1, maximum=255, value=200, step=1, visible=True, interactive=True),
-                    gr.update(visible=True)
-                ]
-            elif module == "mlsd": #Hough
-                return [
-                    gr.update(label="Preprocessor Resolution", minimum=64, maximum=2048, value=512, step=1, visible=not pp, interactive=not pp),
-                    gr.update(label="Hough value threshold (MLSD)", minimum=0.01, maximum=2.0, value=0.1, step=0.01, visible=True, interactive=True),
-                    gr.update(label="Hough distance threshold (MLSD)", minimum=0.01, maximum=20.0, value=0.1, step=0.01, visible=True, interactive=True),
-                    gr.update(visible=True)
-                ]
-            elif module in ["hed", "scribble_hed", "hed_safe"]:
-                return [
-                    gr.update(label="Preprocessor Resolution", minimum=64, maximum=2048, value=512, step=1, visible=not pp, interactive=not pp),
+                    gr.update(label=flag_preprocessor_resolution, value=512, minimum=64, maximum=2048, step=1, visible=not pp, interactive=not pp),
                     gr.update(visible=False, interactive=False),
                     gr.update(visible=False, interactive=False),
                     gr.update(visible=True)
-                ]
-            elif module in ["openpose", "openpose_full", "segmentation"]:
-                return [
-                    gr.update(label="Preprocessor Resolution", minimum=64, maximum=2048, value=512, step=1, visible=not pp, interactive=not pp),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module == "depth":
-                return [
-                    gr.update(label="Preprocessor Resolution", minimum=64, maximum=2048, value=512, step=1, visible=not pp, interactive=not pp),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module in ["depth_leres", "depth_leres++"]:
-                return [
-                    gr.update(label="Preprocessor Resolution", minimum=64, maximum=2048, value=512, step=1, visible=not pp, interactive=not pp),
-                    gr.update(label="Remove Near %", value=0, minimum=0, maximum=100, step=0.1, visible=True, interactive=True),
-                    gr.update(label="Remove Background %", value=0, minimum=0, maximum=100, step=0.1, visible=True, interactive=True),
-                    gr.update(visible=True)
-                ]
-            elif module == "normal_map":
-                return [
-                    gr.update(label="Preprocessor Resolution", minimum=64, maximum=2048, value=512, step=1, visible=not pp, interactive=not pp),
-                    gr.update(label="Normal background threshold", minimum=0.0, maximum=1.0, value=0.4, step=0.01, visible=True, interactive=True),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module == "threshold":
-                return [
-                    gr.update(label="Preprocessor resolution", value=512, minimum=64, maximum=2048, step=1, visible=not pp, interactive=not pp),
-                    gr.update(label="Binarization Threshold", minimum=0, maximum=255, value=127, step=1, visible=True, interactive=True),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module == "scribble_xdog":
-                return [
-                    gr.update(label="Preprocessor resolution", value=512, minimum=64, maximum=2048, step=1, visible=not pp, interactive=not pp),
-                    gr.update(label="XDoG Threshold", minimum=1, maximum=64, value=32, step=1, visible=True, interactive=True),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module == "tile_resample":
-                return [
-                    gr.update(visible=False, interactive=False),
-                    gr.update(label="Down Sampling Rate", value=1.0, minimum=1.0, maximum=8.0, step=0.01, visible=True, interactive=True),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module == "color":
-                return [
-                    gr.update(label="Preprocessor Resolution", value=512, minimum=64, maximum=2048, step=8, visible=not pp, interactive=not pp),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
-            elif module == "mediapipe_face":
-                return [
-                    gr.update(label="Preprocessor Resolution", value=512, minimum=64, maximum=2048, step=8, visible=not pp, interactive=not pp),
-                    gr.update(label="Max Faces", value=1, minimum=1, maximum=10, step=1, visible=True, interactive=True),
-                    gr.update(label="Min Face Confidence", value=0.5, minimum=0.01, maximum=1.0, step=0.01, visible=True, interactive=True),
-                    gr.update(visible=True)
-                ]
-            elif module == "none" or "inpaint" in module:
-                return [
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False)
                 ]
             else:
-                return [
-                    gr.update(label="Preprocessor resolution", value=512, minimum=64, maximum=2048, step=1, visible=not pp, interactive=not pp),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=False, interactive=False),
-                    gr.update(visible=True)
-                ]
+                slider_configs = preprocessor_sliders_config[module]
+                grs = []
+
+                for slider_config in slider_configs:
+                    if isinstance(slider_config, dict):
+                        visible = True
+                        if slider_config['name'] == flag_preprocessor_resolution:
+                            visible = not pp
+                        grs.append(gr.update(
+                            label=slider_config['name'],
+                            value=slider_config['value'],
+                            minimum=slider_config['min'],
+                            maximum=slider_config['max'],
+                            step=slider_config['step'] if 'step' in slider_config else 1,
+                            visible=visible,
+                            interactive=visible))
+                    else:
+                        grs.append(gr.update(visible=False, interactive=False))
+
+                while len(grs) < 3:
+                    grs.append(gr.update(visible=False, interactive=False))
+
+                grs.append(gr.update(visible=True))
+                return grs
 
         # advanced options
         with gr.Column(visible=False) as advanced:
@@ -535,7 +470,7 @@ class Script(scripts.Script):
                 else:
                     estimation = max(k0, k1) * float(min(raw_H, raw_W))
 
-                pres = int(np.round(float(estimation) / 64.0)) * 64
+                pres = int(np.round(estimation))
                 print(f'Pixel Perfect Mode Enabled In Preview.')
                 print(f'resize_mode = {rm}')
                 print(f'raw_H = {raw_H}')
@@ -600,7 +535,7 @@ class Script(scripts.Script):
         else:
             send_dimen_button.click(fn=send_dimensions, inputs=[input_image], outputs=[self.txt2img_w_slider, self.txt2img_h_slider])
 
-        control_mode = gr.Radio(choices=[e.value for e in external_code.ControlMode], value=default_unit.control_mode.value, label="Control Mode (Guess Mode)")
+        control_mode = gr.Radio(choices=[e.value for e in external_code.ControlMode], value=default_unit.control_mode.value, label="Control Mode")
 
         resize_mode = gr.Radio(choices=[e.value for e in external_code.ResizeMode], value=default_unit.resize_mode.value, label="Resize Mode")
 
@@ -621,7 +556,7 @@ class Script(scripts.Script):
         input_mode = gr.State(batch_hijack.InputMode.SIMPLE)
         batch_image_dir_state = gr.State('')
         output_dir_state = gr.State('')
-        unit_args = (input_mode, batch_image_dir_state, output_dir_state, loopback, enabled, module, model, weight, input_image, resize_mode, lowvram, processor_res, threshold_a, threshold_b, guidance_start, guidance_end, guess_mode, pixel_perfect, control_mode)
+        unit_args = (input_mode, batch_image_dir_state, output_dir_state, loopback, enabled, module, model, weight, input_image, resize_mode, lowvram, processor_res, threshold_a, threshold_b, guidance_start, guidance_end, pixel_perfect, control_mode)
         self.register_modules(tabname, unit_args)
 
         input_image.orgpreprocess=input_image.preprocess
@@ -737,7 +672,7 @@ class Script(scripts.Script):
 
     def register_modules(self, tabname, params):
         enabled, module, model, weight = params[4:8]
-        guidance_start, guidance_end, guess_mode, pixel_perfect, control_mode = params[-5:]
+        guidance_start, guidance_end, pixel_perfect, control_mode = params[-4:]
 
         self.infotext_fields.extend([
             (enabled, f"{tabname} Enabled"),
@@ -884,7 +819,7 @@ class Script(scripts.Script):
         unit.guidance_start = selector(p, "control_net_guidance_start", unit.guidance_start, idx)
         unit.guidance_end = selector(p, "control_net_guidance_end", unit.guidance_end, idx)
         unit.guidance_end = selector(p, "control_net_guidance_strength", unit.guidance_end, idx)
-        unit.guess_mode = selector(p, "control_net_guess_mode", unit.guess_mode, idx)
+        unit.control_mode = selector(p, "control_net_control_mode", unit.control_mode, idx)
         unit.pixel_perfect = selector(p, "control_net_pixel_perfect", unit.pixel_perfect, idx)
 
         return unit
@@ -1026,22 +961,23 @@ class Script(scripts.Script):
 
             enabled_units.append(copy(unit))
             if len(units) != 1:
-                prefix = f"ControlNet {idx}"
+                log_key = f"ControlNet {idx}"
             else:
-                prefix = "ControlNet"
+                log_key = "ControlNet"
 
-            p.extra_generation_params.update({
-                f"{prefix} Enabled": True,
-                f"{prefix} Preprocessor": unit.module,
-                f"{prefix} Model": unit.model,
-                f"{prefix} Weight": unit.weight,
-                f"{prefix} Starting Step": unit.guidance_start,
-                f"{prefix} Ending Step": unit.guidance_end,
-                f"{prefix} Resize Mode": str(unit.resize_mode),
-                f"{prefix} Pixel Perfect": str(unit.pixel_perfect),
-                f"{prefix} Control Mode": str(unit.control_mode),
-                f"{prefix} Preprocessor Parameters": str((unit.processor_res, unit.threshold_a, unit.threshold_b)),
-            })
+            log_value = {
+                "preprocessor": unit.module,
+                "model": unit.model,
+                "weight": unit.weight,
+                "starting/ending": str((unit.guidance_start, unit.guidance_end)),
+                "resize mode": str(unit.resize_mode),
+                "pixel perfect": str(unit.pixel_perfect),
+                "control mode": str(unit.control_mode),
+                "preprocessor params": str((unit.processor_res, unit.threshold_a, unit.threshold_b)),
+            }
+            log_value = str(log_value).replace('\'', '').replace('{', '').replace('}', '')
+
+            p.extra_generation_params.update({log_key: log_value})
 
         return enabled_units
 
@@ -1199,9 +1135,13 @@ class Script(scripts.Script):
                 input_image = [np.asarray(x)[:, :, 0] for x in input_image]
                 input_image = np.stack(input_image, axis=2)
 
-            tmp_seed = int(p.all_seeds[0] if p.seed == -1 else max(int(p.seed),0))
-            tmp_subseed = int(p.all_seeds[0] if p.subseed == -1 else max(int(p.subseed),0))
-            np.random.seed((tmp_seed + tmp_subseed) & 0xFFFFFFFF)
+            try:
+                tmp_seed = int(p.all_seeds[0] if p.seed == -1 else max(int(p.seed), 0))
+                tmp_subseed = int(p.all_seeds[0] if p.subseed == -1 else max(int(p.subseed), 0))
+                np.random.seed((tmp_seed + tmp_subseed) & 0xFFFFFFFF)
+            except Exception as e:
+                print(e)
+                print('Warning: Failed to use consistent random seed.')
 
             # safe numpy
             input_image = np.ascontiguousarray(input_image.copy()).copy()
@@ -1223,7 +1163,7 @@ class Script(scripts.Script):
                 else:
                     estimation = max(k0, k1) * float(min(raw_H, raw_W))
 
-                preprocessor_resolution = int(np.round(float(estimation) / 64.0)) * 64
+                preprocessor_resolution = int(np.round(estimation))
 
                 print(f'Pixel Perfect Mode Enabled.')
                 print(f'resize_mode = {str(resize_mode)}')
@@ -1270,7 +1210,6 @@ class Script(scripts.Script):
             forward_param = ControlParams(
                 control_model=model_net,
                 hint_cond=control,
-                guess_mode=unit.guess_mode,
                 weight=unit.weight,
                 guidance_stopped=False,
                 start_guidance_percent=unit.guidance_start,
