@@ -1,15 +1,15 @@
-import inspect
 from enum import Enum
 from typing import List, Any, Optional, Union, Tuple, Dict
 import numpy as np
 from modules import scripts, processing, shared
 from scripts import global_state
+from scripts.processor import preprocessor_sliders_config
 
 from modules.api import api
 
 
 def get_api_version() -> int:
-    return 1
+    return 2
 
 
 class ControlMode(Enum):
@@ -81,10 +81,9 @@ class ControlNetUnit:
         threshold_b: float=64,
         guidance_start: float=0.0,
         guidance_end: float=1.0,
-        guess_mode: bool=False,
         pixel_perfect: bool=False,
         control_mode: Union[ControlMode, int, str] = ControlMode.BALANCED,
-        **_kwargs, # for backwards compatibility
+        **_kwargs,
     ):
         self.enabled = enabled
         self.module = module
@@ -98,7 +97,6 @@ class ControlNetUnit:
         self.threshold_b = threshold_b
         self.guidance_start = guidance_start
         self.guidance_end = guidance_end
-        self.guess_mode = guess_mode
         self.pixel_perfect = pixel_perfect
         self.control_mode = control_mode
 
@@ -107,9 +105,6 @@ class ControlNetUnit:
             return False
 
         return vars(self) == vars(other)
-
-
-PARAM_COUNT = len(inspect.getfullargspec(ControlNetUnit.__init__)[0]) - 1
 
 
 def to_base64_nparray(encoding: str):
@@ -150,14 +145,9 @@ def get_all_units_from(script_args: List[Any]) -> List[ControlNetUnit]:
     units = []
     i = 0
     while i < len(script_args):
-        if type(script_args[i]) is bool:
-            units.append(ControlNetUnit(*script_args[i:i + PARAM_COUNT]))
-            i += PARAM_COUNT
-
-        else:
-            if script_args[i] is not None:
-                units.append(to_processing_unit(script_args[i]))
-            i += 1
+        if script_args[i] is not None:
+            units.append(to_processing_unit(script_args[i]))
+        i += 1
 
     return units
 
@@ -170,15 +160,9 @@ def get_single_unit_from(script_args: List[Any], index: int=0) -> Optional[Contr
 
     i = 0
     while i < len(script_args) and index >= 0:
-        if type(script_args[i]) is bool:
-            if index == 0:
-                return ControlNetUnit(*script_args[i:i + PARAM_COUNT])
-            i += PARAM_COUNT
-
-        else:
-            if index == 0 and script_args[i] is not None:
-                return to_processing_unit(script_args[i])
-            i += 1
+        if index == 0 and script_args[i] is not None:
+            return to_processing_unit(script_args[i])
+        i += 1
 
         index -= 1
 
@@ -210,8 +194,7 @@ def to_processing_unit(unit: Union[Dict[str, Any], ControlNetUnit]) -> ControlNe
             unit['image'] = {'image': unit['image'], 'mask': mask} if mask is not None else unit['image'] if unit['image'] else None
 
         if 'guess_mode' in unit:
-            unit['control_mode'] = ControlMode.CONTROL if unit['guess_mode'] else ControlMode.BALANCED
-            del unit['guess_mode']
+            print('Guess Mode is removed since 1.1.136. Please use Control Mode instead.')
 
         unit = ControlNetUnit(**unit)
 
@@ -304,6 +287,33 @@ def get_modules(alias_names: bool = False) -> List[str]:
         modules = [global_state.preprocessor_aliases.get(module, module) for module in modules]
 
     return modules
+
+
+def get_modules_detail(alias_names: bool = False) -> Dict[str, Any]:
+    """
+    get the detail of all preprocessors including
+    sliders: the slider config in Auto1111 webUI
+
+    Keyword arguments:
+    alias_names -- Whether to get the module detail with alias names instead of internal keys
+    """
+
+    _module_detail = {}
+    _module_list = get_modules(False)
+    _module_list_alias = get_modules(True)
+    
+    _output_list = _module_list if not alias_names else _module_list_alias
+    for index, module in enumerate(_output_list):
+        if _module_list[index] in preprocessor_sliders_config:
+            _module_detail[module] = {
+                "sliders": preprocessor_sliders_config[_module_list[index]]
+            }
+        else:
+            _module_detail[module] = {
+                "sliders": []
+            }
+            
+    return _module_detail
 
 
 def find_cn_script(script_runner: scripts.ScriptRunner) -> Optional[scripts.Script]:
