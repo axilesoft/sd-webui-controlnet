@@ -759,6 +759,16 @@ preprocessor_sliders_config = {
             "step": 0.01
         }
     ],
+    "tile_colorfix": [
+        None,
+        {
+            "name": "Variation",
+            "value": 8.0,
+            "min": 3.0,
+            "max": 32.0,
+            "step": 1.0
+        }
+    ],
     "reference_only": [
         None,
         {
@@ -819,4 +829,23 @@ preprocessor_sliders_config = {
             "step": 0.01
         }
     ],
+}
+
+preprocessor_filters = {
+    "All": "none",
+    "Canny": "canny",
+    "Depth": "depth_midas",
+    "Normal": "normal_bae",
+    "OpenPose": "openpose_full",
+    "MLSD": "mlsd",
+    "Lineart": "lineart_standard (from white bg & black line)",
+    "SoftEdge": "softedge_pidinet",
+    "Scribble": "scribble_pidinet",
+    "Seg": "seg_ofade20k",
+    "Shuffle": "shuffle",
+    "Tile": "tile_resample",
+    "Inpaint": "inpaint_global_harmonious",
+    "IP2P": "none",
+    "Reference": "reference_only",
+    "T2IA": "none",
 }

@@ -33,7 +33,7 @@ import base64
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageOps, ImageGrab
 from scripts.lvminthin import lvmin_thin, nake_nms
-from scripts.processor import preprocessor_sliders_config, flag_preprocessor_resolution, model_free_preprocessors
+from scripts.processor import preprocessor_sliders_config, flag_preprocessor_resolution, model_free_preprocessors, preprocessor_filters
 
 gradio_compat = True
 try:
@@ -207,7 +207,7 @@ class Script(scripts.Script):
     def __init__(self) -> None:
         super().__init__()
         self.latest_network = None
-        self.preprocessor = global_state.cn_preprocessor_modules
+        self.preprocessor = global_state.cache_preprocessors(global_state.cn_preprocessor_modules)
         self.unloadable = global_state.cn_preprocessor_unloadable
         self.input_image = None
         self.latest_model_hash = ""
@@ -365,6 +365,12 @@ class Script(scripts.Script):
             selected = dd if dd in global_state.cn_models else "None"
             return gr.Dropdown.update(value=selected, choices=list(global_state.cn_models.keys()))
 
+        if shared.opts.data.get("controlnet_disable_control_type", False):
+            type_filter = None
+        else:
+            with gr.Row():
+                type_filter = gr.Radio(list(preprocessor_filters.keys()), label=f"Control Type", value='All', elem_id=f'{elem_id_tabname}_{tabname}_controlnet_type_filter_radio')
+
         with gr.Row():
             module = gr.Dropdown(global_state.ui_preprocessor_keys, label=f"Preprocessor", value=default_unit.module, elem_id=f'{elem_id_tabname}_{tabname}_controlnet_preprocessor_dropdown')
             trigger_preprocessor = ToolButton(value=trigger_symbol, visible=True, elem_id=f'{elem_id_tabname}_{tabname}_controlnet_trigger_preprocessor')
@@ -421,6 +427,35 @@ class Script(scripts.Script):
         if gradio_compat:
             module.change(build_sliders, inputs=[module, pixel_perfect], outputs=[processor_res, threshold_a, threshold_b, advanced, model, refresh_models])
             pixel_perfect.change(build_sliders, inputs=[module, pixel_perfect], outputs=[processor_res, threshold_a, threshold_b, advanced, model, refresh_models])
+
+            if type_filter is not None:
+                def filter_selected(k, pp):
+                    default_option = preprocessor_filters[k]
+                    pattern = k.lower()
+                    preprocessor_list = global_state.ui_preprocessor_keys
+                    model_list = list(global_state.cn_models.keys())
+                    if pattern == 'all':
+                        return [gr.Dropdown.update(value='none', choices=preprocessor_list),
+                                gr.Dropdown.update(value='None', choices=model_list)] + build_sliders('none', pp)
+                    filtered_preprocessor_list = [x for x in preprocessor_list if pattern in x.lower() or x.lower() == 'none']
+                    if pattern in ['canny', 'lineart', 'scribble', 'mlsd']:
+                        filtered_preprocessor_list += [x for x in preprocessor_list if 'invert' in x.lower()]
+                    filtered_model_list = [x for x in model_list if pattern in x.lower() or x.lower() == 'none']
+                    if default_option not in filtered_preprocessor_list:
+                        default_option = filtered_preprocessor_list[0]
+                    if len(filtered_model_list) == 1:
+                        default_model = 'None'
+                        filtered_model_list = model_list
+                    else:
+                        default_model = filtered_model_list[1]
+                        for x in filtered_model_list:
+                            if '11' in x.split('[')[0]:
+                                default_model = x
+                                break
+                    return [gr.Dropdown.update(value=default_option, choices=filtered_preprocessor_list),
+                            gr.Dropdown.update(value=default_model, choices=filtered_model_list)] + build_sliders(default_option, pp)
+
+                type_filter.change(filter_selected, inputs=[type_filter, pixel_perfect], outputs=[module, model, processor_res, threshold_a, threshold_b, advanced, model, refresh_models])
 
         # infotext_fields.extend((module, model, weight))
 
@@ -484,9 +519,21 @@ class Script(scripts.Script):
             json_acceptor = JsonAcceptor()
 
             print(f'Preview Resolution = {pres}')
-            result, is_image = preprocessor(img, res=pres, thr_a=pthr_a, thr_b=pthr_b, json_pose_callback=json_acceptor.accept)
 
-            if preprocessor is processor.clip:
+            def is_openpose(module: str):
+                return 'openpose' in module
+            
+            # Only openpose preprocessor returns a JSON output, pass json_acceptor
+            # only when a JSON output is expected. This will make preprocessor cache
+            # work for all other preprocessors other than openpose ones. JSON acceptor
+            # instance are different every call, which means cache will never take 
+            # effect.
+            # TODO: Maybe we should let `preprocessor` return a Dict to alleviate this issue?
+            # This requires changing all callsites though.
+            result, is_image = preprocessor(img, res=pres, thr_a=pthr_a, thr_b=pthr_b,
+                                            json_pose_callback=json_acceptor.accept if is_openpose(module) else None)
+
+            if 'clip' in module:
                 result = processor.clip_vision_visualization(result)
                 is_image = True
 
@@ -1214,8 +1261,6 @@ class Script(scripts.Script):
                 if unit.module == 'clip_vision':
                     detected_maps.append((processor.clip_vision_visualization(detected_map), unit.module))
 
-            is_vanilla_samplers = p.sampler_name in ["DDIM", "PLMS", "UniPC"]
-
             control_model_type = ControlModelType.ControlNet
 
             if isinstance(model_net, PlugableAdapter):
@@ -1232,17 +1277,17 @@ class Script(scripts.Script):
             if model_net is not None:
                 if model_net.config.model.params.get("global_average_pooling", False):
                     global_average_pooling = True
-            elif unit.module in model_free_preprocessors:
-                # Pass preprocessor parameters to model-free control
-                model_net = dict(
-                    name=unit.module,
-                    preprocessor_resolution=preprocessor_resolution,
-                    threshold_a=unit.threshold_a,
-                    threshold_b=unit.threshold_b
-                )
+
+            preprocessor_dict = dict(
+                name=unit.module,
+                preprocessor_resolution=preprocessor_resolution,
+                threshold_a=unit.threshold_a,
+                threshold_b=unit.threshold_b
+            )
 
             forward_param = ControlParams(
                 control_model=model_net,
+                preprocessor=preprocessor_dict,
                 hint_cond=control,
                 weight=unit.weight,
                 guidance_stopped=False,
@@ -1252,10 +1297,6 @@ class Script(scripts.Script):
                 control_model_type=control_model_type,
                 global_average_pooling=global_average_pooling,
                 hr_hint_cond=hr_control,
-                batch_size=p.batch_size,
-                instance_counter=0,
-                is_vanilla_samplers=is_vanilla_samplers,
-                cfg_scale=p.cfg_scale,
                 soft_injection=control_mode != external_code.ControlMode.BALANCED,
                 cfg_injection=control_mode == external_code.ControlMode.CONTROL,
             )
@@ -1264,7 +1305,7 @@ class Script(scripts.Script):
             del model_net
 
         self.latest_network = UnetHook(lowvram=hook_lowvram)
-        self.latest_network.hook(model=unet, sd_ldm=sd_ldm, control_params=forward_params)
+        self.latest_network.hook(model=unet, sd_ldm=sd_ldm, control_params=forward_params, process=p)
         self.detected_map = detected_maps
 
     def postprocess(self, p, processed, *args):
@@ -1365,6 +1406,8 @@ def on_ui_settings():
         False, "Show batch images in gradio gallery output", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("controlnet_increment_seed_during_batch", shared.OptionInfo(
         False, "Increment seed after each controlnet batch iteration", gr.Checkbox, {"interactive": True}, section=section))
+    shared.opts.add_option("controlnet_disable_control_type", shared.OptionInfo(
+        False, "Disable control type selection", gr.Checkbox, {"interactive": True}, section=section))
 
 
 def on_after_component(component, **_kwargs):

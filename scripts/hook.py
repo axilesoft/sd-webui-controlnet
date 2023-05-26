@@ -10,6 +10,75 @@ cond_cast_unet = getattr(devices, 'cond_cast_unet', lambda x: x)
 from ldm.modules.diffusionmodules.util import timestep_embedding
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from ldm.modules.attention import BasicTransformerBlock
+from ldm.models.diffusion.ddpm import extract_into_tensor
+
+from modules.prompt_parser import MulticondLearnedConditioning, ComposableScheduledPromptConditioning, ScheduledPromptConditioning
+
+
+POSITIVE_MARK_TOKEN = 1024
+NEGATIVE_MARK_TOKEN = - POSITIVE_MARK_TOKEN
+MARK_EPS = 1e-3
+
+
+def prompt_context_is_marked(x):
+    t = x[..., 0, :]
+    m = torch.abs(t) - POSITIVE_MARK_TOKEN
+    m = torch.mean(torch.abs(m)).detach().cpu().float().numpy()
+    return float(m) < MARK_EPS
+
+
+def mark_prompt_context(x, positive):
+    if isinstance(x, list):
+        for i in range(len(x)):
+            x[i] = mark_prompt_context(x[i], positive)
+        return x
+    if isinstance(x, MulticondLearnedConditioning):
+        x.batch = mark_prompt_context(x.batch, positive)
+        return x
+    if isinstance(x, ComposableScheduledPromptConditioning):
+        x.schedules = mark_prompt_context(x.schedules, positive)
+        return x
+    if isinstance(x, ScheduledPromptConditioning):
+        cond = x.cond
+        if prompt_context_is_marked(cond):
+            return x
+        mark = POSITIVE_MARK_TOKEN if positive else NEGATIVE_MARK_TOKEN
+        cond = torch.cat([torch.zeros_like(cond)[:1] + mark, cond], dim=0)
+        return ScheduledPromptConditioning(end_at_step=x.end_at_step, cond=cond)
+    return x
+
+
+disable_controlnet_prompt_warning = True
+# You can disable this warning using disable_controlnet_prompt_warning.
+
+
+def unmark_prompt_context(x):
+    if not prompt_context_is_marked(x):
+        # ControlNet must know whether a prompt is conditional prompt (positive prompt) or unconditional conditioning prompt (negative prompt).
+        # You can use the hook.py's `mark_prompt_context` to mark the prompts that will be seen by ControlNet.
+        # Let us say XXX is a MulticondLearnedConditioning or a ComposableScheduledPromptConditioning or a ScheduledPromptConditioning or a list of these components,
+        # if XXX is a positive prompt, you should call mark_prompt_context(XXX, positive=True)
+        # if XXX is a negative prompt, you should call mark_prompt_context(XXX, positive=False)
+        # After you mark the prompts, the ControlNet will know which prompt is cond/uncond and works as expected.
+        # After you mark the prompts, the mismatch errors will disappear.
+        if not disable_controlnet_prompt_warning:
+            print('ControlNet Error: Failed to detect whether an instance is cond or uncond!')
+            print('ControlNet Error: This is mainly because other extension(s) blocked A1111\'s \"process.sample()\" and deleted ControlNet\'s sample function.')
+            print('ControlNet Error: ControlNet will shift to a backup backend but the results will be worse than expectation.')
+            print('Solution (For extension developers): Take a look at ControlNet\' hook.py '
+                  'UnetHook.hook.process_sample and manually call mark_prompt_context to mark cond/uncond prompts.')
+        mark_batch = torch.ones(size=(x.shape[0], 1, 1, 1), dtype=x.dtype, device=x.device)
+        uc_indices = []
+        context = x
+        return mark_batch, uc_indices, context
+    mark = x[:, 0, :]
+    context = x[:, 1:, :]
+    mark = torch.mean(torch.abs(mark - NEGATIVE_MARK_TOKEN), dim=1)
+    mark = (mark > MARK_EPS).float()
+    mark_batch = mark[:, None, None, None].to(x.dtype).to(x.device)
+    uc_indices = mark.detach().cpu().numpy().tolist()
+    uc_indices = [i for i, item in enumerate(uc_indices) if item < 0.5]
+    return mark_batch, uc_indices, context
 
 
 class ControlModelType(Enum):
@@ -72,6 +141,7 @@ class ControlParams:
     def __init__(
             self,
             control_model,
+            preprocessor,
             hint_cond,
             weight,
             guidance_stopped,
@@ -81,14 +151,12 @@ class ControlParams:
             control_model_type,
             hr_hint_cond,
             global_average_pooling,
-            batch_size,
-            instance_counter,
-            is_vanilla_samplers,
-            cfg_scale,
             soft_injection,
-            cfg_injection
+            cfg_injection,
+            **kwargs  # To avoid errors
     ):
         self.control_model = control_model
+        self.preprocessor = preprocessor
         self._hint_cond = hint_cond
         self.weight = weight
         self.guidance_stopped = guidance_stopped
@@ -100,33 +168,8 @@ class ControlParams:
         self.hr_hint_cond = hr_hint_cond
         self.used_hint_cond = None
         self.used_hint_cond_latent = None
-        self.batch_size = batch_size
-        self.instance_counter = instance_counter
-        self.is_vanilla_samplers = is_vanilla_samplers
-        self.cfg_scale = cfg_scale
         self.soft_injection = soft_injection
         self.cfg_injection = cfg_injection
-
-    def generate_uc_mask(self, length, dtype=None, device=None, python_list=False):
-        if self.is_vanilla_samplers and self.cfg_scale == 1:
-            if python_list:
-                return []
-            return torch.tensor([1 for _ in range(length)], dtype=dtype, device=device)
-
-        y = []
-
-        for i in range(length):
-            p = (self.instance_counter + i) % (self.batch_size * 2)
-            if self.is_vanilla_samplers:
-                y += [0] if p < self.batch_size else [1]
-            else:
-                y += [1] if p < self.batch_size else [0]
-
-        self.instance_counter += length
-
-        if python_list:
-            return [i for i in range(length) if y[i] < 0.5]
-        return torch.tensor(y, dtype=dtype, device=device)
 
     @property
     def hint_cond(self):
@@ -171,6 +214,20 @@ def torch_dfs(model: torch.nn.Module):
     return result
 
 
+def predict_start_from_noise(ldm, x_t, t, noise):
+    return extract_into_tensor(ldm.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - extract_into_tensor(ldm.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+
+
+def predict_noise_from_start(ldm, x_t, t, x0):
+    return (extract_into_tensor(ldm.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / extract_into_tensor(ldm.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+
+
+def blur(x, k):
+    y = torch.nn.functional.pad(x, (k, k, k, k), mode='replicate')
+    y = torch.nn.functional.avg_pool2d(y, (k*2+1, k*2+1), stride=(1, 1))
+    return y
+
+
 class UnetHook(nn.Module):
     def __init__(self, lowvram=False) -> None:
         super().__init__()
@@ -190,18 +247,36 @@ class UnetHook(nn.Module):
             current_sampling_percent = (x.sampling_step / x.total_sampling_steps)
             param.guidance_stopped = current_sampling_percent < param.start_guidance_percent or current_sampling_percent > param.stop_guidance_percent
 
-    def hook(self, model, sd_ldm, control_params):
+    def hook(self, model, sd_ldm, control_params, process):
         self.model = model
         self.sd_ldm = sd_ldm
         self.control_params = control_params
 
         outer = self
 
+        def process_sample(*args, **kwargs):
+            # ControlNet must know whether a prompt is conditional prompt (positive prompt) or unconditional conditioning prompt (negative prompt).
+            # You can use the hook.py's `mark_prompt_context` to mark the prompts that will be seen by ControlNet.
+            # Let us say XXX is a MulticondLearnedConditioning or a ComposableScheduledPromptConditioning or a ScheduledPromptConditioning or a list of these components,
+            # if XXX is a positive prompt, you should call mark_prompt_context(XXX, positive=True)
+            # if XXX is a negative prompt, you should call mark_prompt_context(XXX, positive=False)
+            # After you mark the prompts, the ControlNet will know which prompt is cond/uncond and works as expected.
+            # After you mark the prompts, the mismatch errors will disappear.
+            mark_prompt_context(kwargs.get('conditioning', []), positive=True)
+            mark_prompt_context(kwargs.get('unconditional_conditioning', []), positive=False)
+            mark_prompt_context(getattr(process, 'hr_c', []), positive=True)
+            mark_prompt_context(getattr(process, 'hr_uc', []), positive=False)
+            return process.sample_before_CN_hack(*args, **kwargs)
+
         def forward(self, x, timesteps=None, context=None, **kwargs):
             total_controlnet_embedding = [0.0] * 13
             total_t2i_adapter_embedding = [0.0] * 4
             require_inpaint_hijack = False
             is_in_high_res_fix = False
+
+            # Handle cond-uncond marker
+            cond_mark, outer.current_uc_indices, context = unmark_prompt_context(context)
+            # print(str(cond_mark[:, 0, 0, 0].detach().cpu().numpy().tolist()) + ' - ' + str(outer.current_uc_indices))
 
             # High-res fix
             for param in outer.control_params:
@@ -231,16 +306,20 @@ class UnetHook(nn.Module):
             for param in outer.control_params:
                 if param.used_hint_cond_latent is not None:
                     continue
-                if param.control_model_type not in [ControlModelType.AttentionInjection]:
+                if param.control_model_type not in [ControlModelType.AttentionInjection] and param.preprocessor['name'] not in ['tile_colorfix']:
                     continue
                 try:
                     query_size = int(x.shape[0])
-                    latent_hint = param.used_hint_cond[None] * 2.0 - 1.0
+                    latent_hint = param.used_hint_cond
+                    if latent_hint.ndim == 3:
+                        latent_hint = latent_hint[None]
+                    latent_hint = latent_hint * 2.0 - 1.0
                     latent_hint = latent_hint.type(devices.dtype_vae)
                     with devices.autocast():
                         latent_hint = outer.sd_ldm.encode_first_stage(latent_hint)
                         latent_hint = outer.sd_ldm.get_first_stage_encoding(latent_hint)
-                    latent_hint = torch.cat([latent_hint.clone() for _ in range(query_size)], dim=0)
+                    if latent_hint.shape[0] != query_size:
+                        latent_hint = torch.cat([latent_hint.clone() for _ in range(query_size)], dim=0)
                     latent_hint = latent_hint.type(devices.dtype_unet)
                     param.used_hint_cond_latent = latent_hint
                     print(f'ControlNet used {str(devices.dtype_vae)} VAE to encode {latent_hint.shape}.')
@@ -259,11 +338,13 @@ class UnetHook(nn.Module):
 
                 param.control_model.to(devices.get_device_for("controlnet"))
                 query_size = int(x.shape[0])
-                control = param.control_model(x=x, hint=param.used_hint_cond, timesteps=timesteps, context=context)
-                uc_mask = param.generate_uc_mask(query_size, dtype=x.dtype, device=x.device)[:, None, None]
+                hint = param.used_hint_cond
+                if hint.ndim == 2:
+                    hint = hint[None]
+                control = param.control_model(x=x, hint=hint, timesteps=timesteps, context=context)
                 control = torch.cat([control.clone() for _ in range(query_size)], dim=0)
                 control *= param.weight
-                control *= uc_mask
+                control *= cond_mark[:, :, :, 0]
                 context = torch.cat([context, control.clone()], dim=1)
 
             # handle ControlNet / T2I_Adapter
@@ -286,7 +367,11 @@ class UnetHook(nn.Module):
                         require_inpaint_hijack = True
 
                 assert param.used_hint_cond is not None, f"Controlnet is enabled but no input image is given"
-                control = param.control_model(x=x_in, hint=param.used_hint_cond, timesteps=timesteps, context=context)
+
+                hint = param.used_hint_cond
+                if hint.ndim == 3:
+                    hint = hint[None]
+                control = param.control_model(x=x_in, hint=hint, timesteps=timesteps, context=context)
                 control_scales = ([param.weight] * 13)
 
                 if outer.lowvram:
@@ -296,8 +381,7 @@ class UnetHook(nn.Module):
                     query_size = int(x.shape[0])
                     if param.control_model_type == ControlModelType.T2I_Adapter:
                         control = [torch.cat([c.clone() for _ in range(query_size)], dim=0) for c in control]
-                    uc_mask = param.generate_uc_mask(query_size, dtype=x.dtype, device=x.device)[:, None, None, None]
-                    control = [c * uc_mask for c in control]
+                    control = [c * cond_mark for c in control]
 
                 if param.soft_injection or is_in_high_res_fix:
                     # important! use the soft weights with high-res fix can significantly reduce artifacts.
@@ -350,8 +434,6 @@ class UnetHook(nn.Module):
                 if param.control_model_type not in [ControlModelType.AttentionInjection]:
                     continue
 
-                query_size = int(x.shape[0])
-                outer.current_uc_indices = param.generate_uc_mask(query_size, dtype=x.dtype, device=x.device, python_list=True)
                 ref_xt = outer.sd_ldm.q_sample(param.used_hint_cond_latent, torch.round(timesteps.float()).long())
 
                 # Inpaint Hijack
@@ -362,7 +444,7 @@ class UnetHook(nn.Module):
                         param.used_hint_cond_latent
                     ], dim=1)
 
-                outer.current_style_fidelity = float(param.control_model.get('threshold_a', 0.5))
+                outer.current_style_fidelity = float(param.preprocessor['threshold_a'])
                 outer.current_style_fidelity = max(0.0, min(1.0, outer.current_style_fidelity))
 
                 if param.cfg_injection:
@@ -370,7 +452,7 @@ class UnetHook(nn.Module):
                 elif param.soft_injection or is_in_high_res_fix:
                     outer.current_style_fidelity = 0.0
 
-                control_name = param.control_model.get('name', None)
+                control_name = param.preprocessor['name']
 
                 if control_name in ['reference_only', 'reference_adain+attn']:
                     outer.attention_auto_machine = AutoMachine.Write
@@ -415,6 +497,26 @@ class UnetHook(nn.Module):
             # U-Net Output
             h = h.type(x.dtype)
             h = self.out(h)
+
+            # Post-processing for tile color fix
+            for param in outer.control_params:
+                if param.used_hint_cond_latent is None:
+                    continue
+                if param.preprocessor['name'] not in ['tile_colorfix']:
+                    continue
+
+                k = int(param.preprocessor['threshold_a'])
+                if is_in_high_res_fix:
+                    k *= 2
+
+                x0_origin = param.used_hint_cond_latent
+                t = torch.round(timesteps.float()).long()
+                x0_prd = predict_start_from_noise(outer.sd_ldm, x, t, h)
+                x0 = x0_prd - blur(x0_prd, k) + blur(x0_origin, k)
+                eps_prd = predict_noise_from_start(outer.sd_ldm, x, t, x0)
+
+                w = max(0.0, min(1.0, float(param.weight)))
+                h = eps_prd * w + h * (1 - w)
 
             return h
 
@@ -493,6 +595,10 @@ class UnetHook(nn.Module):
             if y is None:
                 y = x
             return y.to(x.dtype)
+
+        if getattr(process, 'sample_before_CN_hack', None) is None:
+            process.sample_before_CN_hack = process.sample
+        process.sample = process_sample
 
         model._original_forward = model.forward
         outer.original_forward = model.forward
