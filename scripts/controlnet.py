@@ -217,6 +217,7 @@ class Script(scripts.Script):
         self.img2img_h_slider = gr.Slider()
         self.enabled_units = []
         self.detected_map = []
+        self.post_processors = []
         batch_hijack.instance.process_batch_callbacks.append(self.batch_tab_process)
         batch_hijack.instance.process_batch_each_callbacks.append(self.batch_tab_process_each)
         batch_hijack.instance.postprocess_batch_each_callbacks.insert(0, self.batch_tab_postprocess_each)
@@ -578,7 +579,7 @@ class Script(scripts.Script):
         else:
             send_dimen_button.click(fn=send_dimensions, inputs=[input_image], outputs=[self.txt2img_w_slider, self.txt2img_h_slider])
 
-        control_mode = gr.Radio(choices=[e.value for e in external_code.ControlMode], value=default_unit.control_mode.value, label="Control Mode", elem_id=f'{elem_id_tabname}_{tabname}_controlnet_control_mod_radio')
+        control_mode = gr.Radio(choices=[e.value for e in external_code.ControlMode], value=default_unit.control_mode.value, label="Control Mode", elem_id=f'{elem_id_tabname}_{tabname}_controlnet_control_mode_radio')
 
         resize_mode = gr.Radio(choices=[e.value for e in external_code.ResizeMode], value=default_unit.resize_mode.value, label="Resize Mode", elem_id=f'{elem_id_tabname}_{tabname}_controlnet_resize_mode_radio')
 
@@ -896,7 +897,7 @@ class Script(scripts.Script):
             # below is very boring but do not change these. If you change these Apple or Mac may fail.
             y = torch.from_numpy(y)
             y = y.float() / 255.0
-            y = rearrange(y, 'h w c -> c h w')
+            y = rearrange(y, 'h w c -> 1 c h w')
             y = y.clone()
             y = y.to(devices.get_device_for("controlnet"))
             y = y.clone()
@@ -949,7 +950,9 @@ class Script(scripts.Script):
                 y = np.stack([y] * 3, axis=2)
 
             if inpaint_mask is not None:
-                y[inpaint_mask > 127] = - 255
+                inpaint_mask = (inpaint_mask > 127).astype(np.float32) * 255.0
+                inpaint_mask = inpaint_mask[:, :, None].clip(0, 255).astype(np.uint8)
+                y = np.concatenate([y, inpaint_mask], axis=2)
 
             return y
 
@@ -1052,6 +1055,7 @@ class Script(scripts.Script):
 
         detected_maps = []
         forward_params = []
+        post_processors = []
         hook_lowvram = False
 
         # cache stuff
@@ -1191,6 +1195,11 @@ class Script(scripts.Script):
                 input_image = [np.asarray(x)[:, :, 0] for x in input_image]
                 input_image = np.stack(input_image, axis=2)
 
+            if 'inpaint' in unit.module and issubclass(type(p), StableDiffusionProcessingImg2Img) \
+                    and p.inpainting_fill and p.image_mask is not None:
+                print('A1111 inpaint and ControlNet inpaint duplicated. ControlNet support enabled.')
+                unit.module = 'inpaint'
+
             try:
                 tmp_seed = int(p.all_seeds[0] if p.seed == -1 else max(int(p.seed), 0))
                 tmp_subseed = int(p.all_seeds[0] if p.subseed == -1 else max(int(p.subseed), 0))
@@ -1302,11 +1311,34 @@ class Script(scripts.Script):
             )
             forward_params.append(forward_param)
 
+            if unit.module == 'inpaint_only':
+
+                final_inpaint_feed = hr_control if hr_control is not None else control
+                final_inpaint_feed = final_inpaint_feed.detach().cpu().numpy()[0].transpose([1, 2, 0])
+                final_inpaint_feed = np.ascontiguousarray(final_inpaint_feed).copy()
+                final_inpaint_mask = final_inpaint_feed[:, :, 3].astype(np.float32)
+                final_inpaint_raw = final_inpaint_feed[:, :, 0:3].astype(np.float32) * 255.0
+                final_inpaint_mask = cv2.GaussianBlur(final_inpaint_mask, (0, 0), 4)[:, :, None]
+                Hmask, Wmask, _ = final_inpaint_mask.shape
+
+                def inpaint_only_post_processing(x):
+                    img = np.asarray(x).astype(np.float32)
+                    H, W, C = img.shape
+                    if Hmask != H or Wmask != W:
+                        return x
+                    result = final_inpaint_mask * img + final_inpaint_raw * (1 - final_inpaint_mask)
+                    result = result.clip(0, 255).astype(np.uint8)
+                    result = np.ascontiguousarray(result).copy()
+                    return Image.fromarray(result)
+
+                post_processors.append(inpaint_only_post_processing)
+
             del model_net
 
         self.latest_network = UnetHook(lowvram=hook_lowvram)
         self.latest_network.hook(model=unet, sd_ldm=sd_ldm, control_params=forward_params, process=p)
         self.detected_map = detected_maps
+        self.post_processors = post_processors
 
     def postprocess(self, p, processed, *args):
         processor_params_flag = (', '.join(getattr(processed, 'extra_generation_params', []))).lower()
@@ -1327,6 +1359,10 @@ class Script(scripts.Script):
         if self.latest_network is None:
             return
 
+        if 'sd upscale' not in processor_params_flag:
+            for post_processor in self.post_processors:
+                processed.images = list(map(post_processor, processed.images))
+
         if not batch_hijack.instance.is_batch:
             if not shared.opts.data.get("control_net_no_detectmap", False):
                 if 'sd upscale' not in processor_params_flag:
@@ -1334,9 +1370,14 @@ class Script(scripts.Script):
                         for detect_map, module in self.detected_map:
                             if detect_map is None:
                                 continue
+                            detect_map = np.ascontiguousarray(detect_map.copy()).copy()
+                            if detect_map.ndim == 3 and detect_map.shape[2] == 4:
+                                inpaint_mask = detect_map[:, :, 3]
+                                detect_map = detect_map[:, :, 0:3]
+                                detect_map[inpaint_mask > 127] = 0
                             processed.images.extend([
                                 Image.fromarray(
-                                    np.ascontiguousarray(detect_map.copy()).copy().clip(0, 255).astype(np.uint8)
+                                    detect_map.clip(0, 255).astype(np.uint8)
                                 )
                             ])
 
