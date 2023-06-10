@@ -3,6 +3,7 @@ import functools
 from typing import List, Optional, Union, Dict, Callable
 import numpy as np
 import base64
+from PIL import Image,ImageGrab
 
 from scripts.utils import svg_preprocess
 from scripts import (
@@ -173,6 +174,7 @@ class ControlNetUiGroup(object):
                             elem_id=f"{elem_id_tabname}_{tabname}_input_image",
                             elem_classes=["cnet-image"],
                         )
+
                     with gr.Group(
                         visible=False, elem_classes=["cnet-generated-image-group"]
                     ) as self.generated_image_group:
@@ -232,9 +234,16 @@ class ControlNetUiGroup(object):
 
         with gr.Row(elem_classes="controlnet_image_controls"):
             gr.HTML(
-                value="<p>Set the preprocessor to [invert] If your image has white background and black lines.</p>",
+                value="<p>[invert] if W.BG B.line.</p>",
                 elem_classes="controlnet_invert_warning",
             )
+
+            webcam_grab = ToolButton(value="P")
+            def webcam_grab_click():
+                img = ImageGrab.grabclipboard()
+                return img
+            webcam_grab.click(fn=webcam_grab_click, inputs=None, outputs=self.input_image)
+
             self.open_new_canvas_button = ToolButton(
                 value=ControlNetUiGroup.open_symbol,
                 elem_id=f"{elem_id_tabname}_{tabname}_controlnet_open_new_canvas_button",
