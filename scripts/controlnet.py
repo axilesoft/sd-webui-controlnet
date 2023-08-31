@@ -1,10 +1,10 @@
 import gc
 import os
 import logging
+import re
 from collections import OrderedDict
 from copy import copy
 from typing import Dict, Optional, Tuple
-import importlib
 import modules.scripts as scripts
 from modules import shared, devices, script_callbacks, processing, masking, images
 import gradio as gr
@@ -13,16 +13,6 @@ import gradio as gr
 from einops import rearrange
 from scripts import global_state, hook, external_code, processor, batch_hijack, controlnet_version, utils
 from scripts.controlnet_ui import controlnet_ui_group
-importlib.reload(processor)
-importlib.reload(utils)
-importlib.reload(global_state)
-importlib.reload(hook)
-importlib.reload(external_code)
-# Reload ui group as `ControlNetUnit` is redefined in `external_code`. If `controlnet_ui_group`
-# is not reloaded, `UiControlNetUnit` will inherit from a stale version of `ControlNetUnit`,
-# which can cause typecheck to fail.
-importlib.reload(controlnet_ui_group)  
-importlib.reload(batch_hijack)
 from scripts.cldm import PlugableControlModel
 from scripts.processor import *
 from scripts.adapter import PlugableAdapter
@@ -32,6 +22,7 @@ from scripts.controlnet_ui.controlnet_ui_group import ControlNetUiGroup, UiContr
 from scripts.logging import logger
 from modules.processing import StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img
 from modules.images import save_image
+from scripts.infotext import Infotext
 
 from modules.ui_components import FormRow
 
@@ -176,8 +167,22 @@ def prepare_mask(
     mask = mask.convert("L")
     if getattr(p, "inpainting_mask_invert", False):
         mask = ImageOps.invert(mask)
-    if getattr(p, "mask_blur", 0) > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(p.mask_blur))
+    
+    if hasattr(p, 'mask_blur_x'):
+        if getattr(p, "mask_blur_x", 0) > 0:
+            np_mask = np.array(mask)
+            kernel_size = 2 * int(2.5 * p.mask_blur_x + 0.5) + 1
+            np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), p.mask_blur_x)
+            mask = Image.fromarray(np_mask)
+        if getattr(p, "mask_blur_y", 0) > 0:
+            np_mask = np.array(mask)
+            kernel_size = 2 * int(2.5 * p.mask_blur_y + 0.5) + 1
+            np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), p.mask_blur_y)
+            mask = Image.fromarray(np_mask)
+    else:
+        if getattr(p, "mask_blur", 0) > 0:
+            mask = mask.filter(ImageFilter.GaussianBlur(p.mask_blur))
+    
     return mask
 
 
@@ -245,24 +250,23 @@ class Script(scripts.Script, metaclass=(
             model="None"
         )
 
-    def uigroup(self, tabname: str, is_img2img: bool, elem_id_tabname: str):
+    def uigroup(self, tabname: str, is_img2img: bool, elem_id_tabname: str) -> Tuple[ControlNetUiGroup, gr.State]:
         group = ControlNetUiGroup(
             gradio_compat,
-            self.infotext_fields,
             Script.get_default_ui_unit(),
             self.preprocessor,
         )
-        group.render(tabname, elem_id_tabname)
+        group.render(tabname, elem_id_tabname, is_img2img)
         group.register_callbacks(is_img2img)
-        return group.render_and_register_unit(tabname, is_img2img)
+        return group, group.render_and_register_unit(tabname, is_img2img)
 
     def ui(self, is_img2img):
         """this function should create gradio UI elements. See https://gradio.app/docs/#components
         The return value should be an array of all components that are used in processing.
         Values of those returned components will be passed to run() and process() functions.
         """
-        self.infotext_fields = []
-        self.paste_field_names = []
+        infotext = Infotext()
+        
         controls = ()
         max_models = shared.opts.data.get("control_net_max_models_num", 1)
         elem_id_tabname = ("img2img" if is_img2img else "txt2img") + "_controlnet"
@@ -273,14 +277,18 @@ class Script(scripts.Script, metaclass=(
                         for i in range(max_models):
                             with gr.Tab(f"ControlNet Unit {i}", 
                                         elem_classes=['cnet-unit-tab']):
-                                controls += (self.uigroup(f"ControlNet-{i}", is_img2img, elem_id_tabname),)
+                                group, state = self.uigroup(f"ControlNet-{i}", is_img2img, elem_id_tabname)
+                                infotext.register_unit(i, group)
+                                controls += (state,)
                 else:
                     with gr.Column():
-                        controls += (self.uigroup(f"ControlNet", is_img2img, elem_id_tabname),)
+                        group, state = self.uigroup(f"ControlNet", is_img2img, elem_id_tabname)
+                        infotext.register_unit(0, group)
+                        controls += (state,)
 
-        if shared.opts.data.get("control_net_sync_field_args", False):
-            for _, field_name in self.infotext_fields:
-                self.paste_field_names.append(field_name)
+        if shared.opts.data.get("control_net_sync_field_args", True):
+            self.infotext_fields = infotext.infotext_fields
+            self.paste_field_names = infotext.paste_field_names
 
         return controls
     
@@ -562,39 +570,19 @@ class Script(scripts.Script, metaclass=(
     @staticmethod
     def get_enabled_units(p):
         units = external_code.get_all_units_in_processing(p)
-        enabled_units = []
-
         if len(units) == 0:
             # fill a null group
             remote_unit = Script.parse_remote_call(p, Script.get_default_ui_unit(), 0)
             if remote_unit.enabled:
                 units.append(remote_unit)
-
-        for idx, unit in enumerate(units):
-            unit = Script.parse_remote_call(p, unit, idx)
-            if not unit.enabled:
-                continue
-
-            enabled_units.append(copy(unit))
-            if len(units) != 1:
-                log_key = f"ControlNet {idx}"
-            else:
-                log_key = "ControlNet"
-
-            log_value = {
-                "preprocessor": unit.module,
-                "model": unit.model,
-                "weight": unit.weight,
-                "starting/ending": str((unit.guidance_start, unit.guidance_end)),
-                "resize mode": str(unit.resize_mode),
-                "pixel perfect": str(unit.pixel_perfect),
-                "control mode": str(unit.control_mode),
-                "preprocessor params": str((unit.processor_res, unit.threshold_a, unit.threshold_b)),
-            }
-            log_value = str(log_value).replace('\'', '').replace('{', '').replace('}', '')
-
-            p.extra_generation_params.update({log_key: log_value})
-
+        
+        enabled_units = [
+            copy(local_unit)
+            for idx, unit in enumerate(units)
+            for local_unit in (Script.parse_remote_call(p, unit, idx),)
+            if local_unit.enabled
+        ]
+        Infotext.write_infotext(enabled_units, p)
         return enabled_units
 
     @staticmethod
@@ -642,7 +630,10 @@ class Script(scripts.Script, metaclass=(
             else:
                 input_image = HWC3(image['image'])
 
-            have_mask = 'mask' in image and not ((image['mask'][:, :, 0] == 0).all() or (image['mask'][:, :, 0] == 255).all())
+            have_mask = 'mask' in image and not (
+                (image['mask'][:, :, 0] <= 5).all() or 
+                (image['mask'][:, :, 0] >= 250).all()
+            )
 
             if 'inpaint' in unit.module:
                 logger.info("using inpaint as input")
@@ -653,7 +644,7 @@ class Script(scripts.Script, metaclass=(
                     alpha = np.zeros_like(color)[:, :, 0:1]
                 input_image = np.concatenate([color, alpha], axis=2)
             else:
-                if have_mask:
+                if have_mask and not shared.opts.data.get("controlnet_ignore_noninpaint_mask", False):
                     logger.info("using mask as input")
                     input_image = HWC3(image['mask'][:, :, 0])
                     unit.module = 'none'  # Always use black bg and white line
@@ -716,6 +707,11 @@ class Script(scripts.Script, metaclass=(
         if len(self.enabled_units) == 0:
            self.latest_network = None
            return
+        
+        is_sdxl = getattr(p.sd_model, 'is_sdxl', False)
+        if is_sdxl:
+            logger.warning('ControlNet does not support SDXL -- disabling')
+            return
 
         detected_maps = []
         forward_params = []
@@ -915,7 +911,7 @@ class Script(scripts.Script, metaclass=(
                 final_inpaint_feed = np.ascontiguousarray(final_inpaint_feed).copy()
                 final_inpaint_mask = final_inpaint_feed[0, 3, :, :].astype(np.float32)
                 final_inpaint_raw = final_inpaint_feed[0, :3].astype(np.float32)
-                sigma = 7
+                sigma = shared.opts.data.get("control_net_inpaint_blur_sigma", 7)
                 final_inpaint_mask = cv2.dilate(final_inpaint_mask, np.ones((sigma, sigma), dtype=np.uint8))
                 final_inpaint_mask = cv2.blur(final_inpaint_mask, (sigma, sigma))[None]
                 _, Hmask, Wmask = final_inpaint_mask.shape
@@ -948,7 +944,7 @@ class Script(scripts.Script, metaclass=(
     def postprocess_batch(self, p, *args, **kwargs):
         images = kwargs.get('images', [])
         for post_processor in self.post_processors:
-            for i in range(images.shape[0]):
+            for i in range(len(images)):
                 images[i] = post_processor(images[i])
         return
 
@@ -1045,6 +1041,10 @@ def on_ui_settings():
         3, "Multi ControlNet: Max models amount (requires restart)", gr.Slider, {"minimum": 1, "maximum": 10, "step": 1}, section=section))
     shared.opts.add_option("control_net_model_cache_size", shared.OptionInfo(
         1, "Model cache size (requires restart)", gr.Slider, {"minimum": 1, "maximum": 5, "step": 1}, section=section))
+    shared.opts.add_option("control_net_inpaint_blur_sigma", shared.OptionInfo(
+        7, "ControlNet inpainting Gaussian blur sigma", gr.Slider, {"minimum": 0, "maximum": 64, "step": 1}, section=section))
+    shared.opts.add_option("control_net_no_high_res_fix", shared.OptionInfo(
+        False, "Do not apply ControlNet during highres fix", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_no_detectmap", shared.OptionInfo(
         False, "Do not append detectmap to output", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_detectmap_autosaving", shared.OptionInfo(
@@ -1052,7 +1052,7 @@ def on_ui_settings():
     shared.opts.add_option("control_net_allow_script_control", shared.OptionInfo(
         False, "Allow other script to control this extension", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("control_net_sync_field_args", shared.OptionInfo(
-        False, "Passing ControlNet parameters with \"Send to img2img\"", gr.Checkbox, {"interactive": True}, section=section))
+        True, "Paste ControlNet parameters in infotext", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("controlnet_show_batch_images_in_ui", shared.OptionInfo(
         False, "Show batch images in gradio gallery output", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("controlnet_increment_seed_during_batch", shared.OptionInfo(
@@ -1061,8 +1061,12 @@ def on_ui_settings():
         False, "Disable control type selection", gr.Checkbox, {"interactive": True}, section=section))
     shared.opts.add_option("controlnet_disable_openpose_edit", shared.OptionInfo(
         False, "Disable openpose edit", gr.Checkbox, {"interactive": True}, section=section))
+    shared.opts.add_option("controlnet_ignore_noninpaint_mask", shared.OptionInfo(
+        False, "Ignore mask on ControlNet input image if control type is not inpaint", 
+        gr.Checkbox, {"interactive": True}, section=section))
 
 
 batch_hijack.instance.do_hijack()
 script_callbacks.on_ui_settings(on_ui_settings)
+script_callbacks.on_infotext_pasted(Infotext.on_infotext_pasted)
 script_callbacks.on_after_component(ControlNetUiGroup.on_after_component)

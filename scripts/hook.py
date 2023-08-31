@@ -18,6 +18,7 @@ from ldm.modules.attention import BasicTransformerBlock
 from ldm.models.diffusion.ddpm import extract_into_tensor
 
 from modules.prompt_parser import MulticondLearnedConditioning, ComposableScheduledPromptConditioning, ScheduledPromptConditioning
+from modules.processing import StableDiffusionProcessing
 
 
 POSITIVE_MARK_TOKEN = 1024
@@ -83,6 +84,10 @@ def unmark_prompt_context(x):
     mark_batch = mark[:, None, None, None].to(x.dtype).to(x.device)
     uc_indices = mark.detach().cpu().numpy().tolist()
     uc_indices = [i for i, item in enumerate(uc_indices) if item < 0.5]
+
+    StableDiffusionProcessing.cached_c = [None, None]
+    StableDiffusionProcessing.cached_uc = [None, None]
+
     return mark_batch, uc_indices, context
 
 
@@ -387,6 +392,8 @@ class UnetHook(nn.Module):
                             param.used_hint_cond_latent = None
                             param.used_hint_inpaint_hijack = None
 
+            no_high_res_control = is_in_high_res_fix and shared.opts.data.get("control_net_no_high_res_fix", False)
+
             # Convert control image to latent
             for param in outer.control_params:
                 if param.used_hint_cond_latent is not None:
@@ -399,6 +406,9 @@ class UnetHook(nn.Module):
 
             # handle prompt token control
             for param in outer.control_params:
+                if no_high_res_control:
+                    continue
+
                 if param.guidance_stopped:
                     continue
 
@@ -414,6 +424,9 @@ class UnetHook(nn.Module):
 
             # handle ControlNet / T2I_Adapter
             for param in outer.control_params:
+                if no_high_res_control:
+                    continue
+
                 if param.guidance_stopped:
                     continue
 
@@ -524,6 +537,9 @@ class UnetHook(nn.Module):
 
             # Handle attention and AdaIn control
             for param in outer.control_params:
+                if no_high_res_control:
+                    continue
+
                 if param.guidance_stopped:
                     continue
 
@@ -605,7 +621,7 @@ class UnetHook(nn.Module):
                     continue
 
                 k = int(param.preprocessor['threshold_a'])
-                if is_in_high_res_fix:
+                if is_in_high_res_fix and not no_high_res_control:
                     k *= 2
 
                 # Inpaint hijack
